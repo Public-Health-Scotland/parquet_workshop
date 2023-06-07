@@ -1,0 +1,146 @@
+---
+title: "Using parquet files makes everything better"
+author: "James McMahon"
+date: "`r Sys.Date()`"
+output:
+  ioslides_presentation:
+    css: phs-ioslides-theme.css
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+library(arrow)
+library(dplyr)
+
+spd_path <- fs::path(
+  "/conf/linkage/output/lookups/Unicode/Geography",
+  "Scottish Postcode Directory",
+  "Scottish_Postcode_Directory_2023_1.parquet"
+)
+```
+
+## Intro to parquet
+
+-   A cross-platform (R / Python etc.) binary file type.
+-   Supports modern compression - [Zstandard](https://en.m.wikipedia.org/wiki/Zstd)
+-   Stores tabular data (e.g. tibbles/dataframes) by column.
+-   The fastest tested file type for reading and writing over the PHS PWB connection.
+-   Low memory usage as standard, but has optional features to improve things further.
+
+## Writing a parquet file
+
+-   To write a parquet file we use the `{arrow}` package.
+-   `write_parquet(data, path)` - Default compression 'snappy'.
+-   `write_parquet(data, path, compression = "zstd")` - Great compression using 'Zstandard'
+
+Using more compression will take up less space on the disk but might be (slightly) slower to write, the read times however are mostly unaffected by the compression level.
+
+## Reading a parquet file
+
+-   To read we use `read_parquet(file)`, also from the `{arrow}` package.
+
+```{r read_no_run, echo = TRUE, eval = FALSE}
+library(arrow)
+
+spd_path <- fs::path(
+  "/conf/linkage/output/lookups/Unicode/Geography",
+  "Scottish Postcode Directory",
+  "Scottish_Postcode_Directory_2023_1.parquet"
+)
+
+read_parquet(file = spd_path)
+```
+
+## Benchmarking - Writing to Stats
+
+Writing an extract of 1 million rows from the SMR01 dataset to the Stats server. Times presented below are in seconds.
+
+| Package | File Format | Compression         | Minimum Time | Median Time |
+|---------|-------------|---------------------|--------------|-------------|
+| {arrow} | parquet     | ZStandard           | 39.57        | 39.77       |
+| {arrow} | parquet     | Snappy              | 46.53        | 46.59       |
+| {readr} | csv         | Uncompressed        | 174          | 174         |
+| {base}  | rds         | Default Compression | 222.6        | 227.4       |
+| {fst}   | fst         | Default Compression | 978          | 980.4       |
+
+## Benchmarking - Reading from Stats
+
+Reading an extract of the SMR01 dataset containing 1 million rows, and aggregating to present a count of the number of episodes by location. Times presented below are in seconds.
+
+| Package | File Format | Compression         | Minimum Time | Median Time |
+|---------|-------------|---------------------|--------------|-------------|
+| {fst}   | fst         | Default Compression | 0.34799      | 0.35548     |
+| {arrow} | parquet     | ZStandard           | 0.37768      | 0.38025     |
+| {arrow} | parquet     | Snappy              | 0.38535      | 0.3921      |
+| {readr} | csv         | Uncompressed        | 4.06         | 4.13        |
+| {base}  | rds         | Default Compression | 17.43        | 17.52       |
+
+## Ex 1 - Reading the SPD
+
+The SPD exists on Stats in a few different formats, we can read them all and compare them using the `{bench}` package.
+
+```{r read_spd_bench_fake1, echo = TRUE, eval = FALSE}
+bench::mark(
+  rds = readr::read_rds(fs::path_ext_set(spd_path, "rds")),
+  csv = readr::read_csv(fs::path_ext_set(spd_path, "csv")),
+  csv_zip = readr::read_csv(fs::path_ext_set(spd_path, "zip")),
+  parquet = read_parquet(file = spd_path)
+)
+```
+
+## Ex 1 - Reading the SPD
+
+```{r read_spd_bench_real1, echo = FALSE, eval = TRUE, cache=TRUE, message=FALSE, warning=FALSE}
+bm1 <- bench::mark(
+  rds = readr::read_rds(fs::path_ext_set(spd_path, "rds")),
+  csv = readr::read_csv(fs::path_ext_set(spd_path, "csv")),
+  csv_zip = readr::read_csv(fs::path_ext_set(spd_path, "zip")),
+  parquet = read_parquet(file = spd_path),
+  check = FALSE
+)
+bm1
+```
+
+## Ex 2 - Reading a file and performing an aggregate
+
+The speed-up and memory savings are maintained when doing analysis. This example reads the SPD and then does a count (of postcodes) for each HSCP name.
+
+```{r read_spd_bench_fake2, echo = TRUE, eval = FALSE}
+bench::mark(
+  rds = readr::read_rds(fs::path_ext_set(spd_path, "rds")) %>% 
+    dplyr::count(hscp2019name),
+  csv = readr::read_csv(fs::path_ext_set(spd_path, "csv")) %>% 
+    dplyr::count(hscp2019name),
+  csv_zip = readr::read_csv(fs::path_ext_set(spd_path, "zip")) %>% 
+    dplyr::count(hscp2019name),
+  parquet = read_parquet(file = spd_path) %>% 
+    dplyr::count(hscp2019name)
+)
+```
+
+## Ex 2 - Reading a file and performing an aggregate
+
+```{r read_spd_bench_real2, echo = FALSE, eval = TRUE, cache=TRUE, message=FALSE, warning=FALSE}
+bm2 <- bench::mark(
+  rds = readr::read_rds(fs::path_ext_set(spd_path, "rds")) %>% 
+    dplyr::count(hscp2019name),
+  csv = readr::read_csv(fs::path_ext_set(spd_path, "csv")) %>% 
+    dplyr::count(hscp2019name),
+  csv_zip = readr::read_csv(fs::path_ext_set(spd_path, "zip")) %>% 
+    dplyr::count(hscp2019name),
+  parquet = read_parquet(file = spd_path) %>% 
+    dplyr::count(hscp2019name),
+  check = FALSE
+)
+
+bm2
+```
+
+## Bonus features - Further reading
+
+The `{arrow}` package gives some extra features, not necessarily exclusive to the `parquet` format. These 'bonus features' can speed up and reduce memory usage even further, especially when dealing with large data files!
+
+-   You can read only specific columns `read_parquet(file, col_select = c(var1, var2))`. [`read_parquet()` reference.](https://arrow.apache.org/docs/r/reference/read_parquet.html)
+-   You can read and do super-efficient analyses using arrow's 'Arrow Table' feature. `read_parquet(file, as_data_frame = FALSE) %>% ... %>% collect()` [Data wrangling article](https://arrow.apache.org/docs/r/articles/data_wrangling.html)
+-   You can use arrow's 'Dataset' feature to store and use files with obvious groupings efficiently. [Dataset article](https://arrow.apache.org/docs/r/articles/dataset.html)
